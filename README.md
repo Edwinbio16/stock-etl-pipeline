@@ -6,7 +6,7 @@ A Python ETL (Extract, Transform, Load) pipeline that ingests daily stock quotes
 
 - **Extract** — calls the Alpha Vantage `GLOBAL_QUOTE` REST endpoint for a configurable list of tickers and parses the nested JSON response.
 - **Transform** — extracts a defined set of fields (symbol, date, open, high, low, price) from each response.
-- **Load** — inserts each record into a SQLite database using parameterised SQL statements.
+- **Load** — writes each record into a SQLite database using parameterised SQL statements, with `INSERT OR REPLACE` keyed on `(symbol, date)` so the pipeline can be re-run safely without creating duplicate rows.
 
 The pipeline is resilient: each API call and extraction is wrapped in `try/except`, so a bad or rate-limited response for one ticker is logged and skipped without bringing down the whole run.
 
@@ -24,7 +24,7 @@ The pipeline is resilient: each API call and extraction is wrapped in `try/excep
 | `pipeline.py` | The daily ETL run — fetches, transforms, and loads data |
 | `.env` | Holds the API key (not committed — see Setup) |
 
-Setup and ingestion are kept in separate files to maintain a clean separation of concerns.
+Setup and ingestion are kept in separate files to maintain a clean separation of concerns. The `stocks` table uses a composite primary key of `(symbol, date)`, which is what makes the `INSERT OR REPLACE` re-run behaviour possible.
 
 ## Setup
 
@@ -53,9 +53,11 @@ Setup and ingestion are kept in separate files to maintain a clean separation of
 ## Example output
 
 ```
-Successfully fetched AAPL: $307.34
-Skipping TSLA: API didn't return expected data (likely rate limit)
-Successfully fetched MSFT: $416.67
+Database setup complete.
+Successfully fetched AAPL: $307.3400
+Skipping TSLA: API didn't return expected data (likely rate limit or invalid ticker)
+Successfully fetched MSFT: $416.6700
+Skipping NVDA: API didn't return expected data (likely rate limit or invalid ticker)
 Pipeline finished — data saved to database!
 ```
 
@@ -64,7 +66,7 @@ Pipeline finished — data saved to database!
 Once the pipeline has run, the data can be queried with SQL. For example:
 
 ```sql
--- Average closing price per stock
+-- Average price per stock
 SELECT symbol, AVG(price) FROM stocks GROUP BY symbol;
 
 -- Highest price recorded
@@ -75,10 +77,3 @@ SELECT symbol, MAX(price) FROM stocks;
 
 - The Alpha Vantage free tier is limited to 25 requests per day, so some tickers may be skipped on a given run — the pipeline handles this gracefully.
 - The API key is loaded from a `.env` file and excluded from version control via `.gitignore`, so no credentials are committed to the repository.
-
-## Possible next steps
-
-- Schedule the pipeline to run automatically (cron / Task Scheduler / GitHub Actions)
-- Add logging via Python's `logging` module
-- Add an analysis script to surface trends over time
-- Migrate from SQLite to PostgreSQL for a multi-user setup
