@@ -71,7 +71,7 @@ SELECT symbol, AVG(price) FROM stocks GROUP BY symbol;
 
 -- Highest price recorded
 SELECT symbol, MAX(price) FROM stocks;
-```
+``.
 
 ## Notes
 
