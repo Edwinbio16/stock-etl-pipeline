@@ -1,14 +1,14 @@
 # Stock Market ETL Pipeline
 
-A Python ETL (Extract, Transform, Load) pipeline that ingests daily stock quotes from the Alpha Vantage API, transforms the response, and loads structured records into a SQLite database. Built to run daily and accumulate a queryable time series of market data.
+A Python ETL (Extract, Transform, Load) pipeline that ingests daily stock history from the Alpha Vantage API, transforms the response, and loads structured records into a SQLite database. It backfills ~100 days of history per ticker on the first run and can be re-run daily to keep a queryable time series of market data up to date.
 
 ## What it does
 
-- **Extract** — calls the Alpha Vantage `GLOBAL_QUOTE` REST endpoint for a configurable list of tickers and parses the nested JSON response.
-- **Transform** — extracts a defined set of fields (symbol, date, open, high, low, price) from each response.
-- **Load** — writes each record into a SQLite database using parameterised SQL statements, with `INSERT OR REPLACE` keyed on `(symbol, date)` so the pipeline can be re-run safely without creating duplicate rows.
+- **Extract** — calls the Alpha Vantage `TIME_SERIES_DAILY` REST endpoint for a configurable list of tickers. Each call returns roughly 100 days of daily history (`outputsize=compact`), parsed from the nested JSON response.
+- **Transform** — for every day in the response, extracts a defined set of fields (symbol, date, open, high, low, close-as-price).
+- **Load** — writes each daily record into a SQLite database using parameterised SQL statements, with `INSERT OR REPLACE` keyed on `(symbol, date)` so the pipeline can be re-run safely: overlapping days are overwritten and new days are added, never duplicated.
 
-The pipeline is resilient: each API call and extraction is wrapped in `try/except`, so a bad or rate-limited response for one ticker is logged and skipped without bringing down the whole run.
+The pipeline is resilient: each API call and extraction is wrapped in `try/except`, so a bad or rate-limited response for one ticker is logged and skipped without bringing down the whole run. To stay under the free tier's per-minute rate limit, it pauses briefly (`time.sleep`) between tickers.
 
 ## Tech stack
 
@@ -54,12 +54,14 @@ Setup and ingestion are kept in separate files to maintain a clean separation of
 
 ```
 Database setup complete.
-Successfully fetched AAPL: $307.3400
-Skipping TSLA: API didn't return expected data (likely rate limit or invalid ticker)
-Successfully fetched MSFT: $416.6700
-Skipping NVDA: API didn't return expected data (likely rate limit or invalid ticker)
+Successfully fetched AAPL: 100 days of history
+Successfully fetched TSLA: 100 days of history
+Successfully fetched MSFT: 100 days of history
+Successfully fetched NVDA: 100 days of history
 Pipeline finished — data saved to database!
 ```
+
+A full run takes about a minute because of the deliberate pauses between tickers (see Notes).
 
 ## Querying the data
 
@@ -71,9 +73,15 @@ SELECT symbol, AVG(price) FROM stocks GROUP BY symbol;
 
 -- Highest price recorded
 SELECT symbol, MAX(price) FROM stocks;
-``.
+
+-- 5-day moving average of closing price (window function)
+SELECT symbol, date, price,
+       AVG(price) OVER (PARTITION BY symbol ORDER BY date
+                        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS moving_avg_5d
+FROM stocks ORDER BY symbol, date;
+```
 
 ## Notes
 
-- The Alpha Vantage free tier is limited to 25 requests per day, so some tickers may be skipped on a given run — the pipeline handles this gracefully.
+- The Alpha Vantage free tier is limited to 25 requests per day **and** a few requests per minute. The pipeline pauses ~15 seconds between tickers to avoid the per-minute limit; if a request is still throttled, that ticker is skipped gracefully and can be picked up on the next run.
 - The API key is loaded from a `.env` file and excluded from version control via `.gitignore`, so no credentials are committed to the repository.
