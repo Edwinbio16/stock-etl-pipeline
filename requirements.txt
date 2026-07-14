@@ -1,2 +1,4 @@
 requests
 python-dotenv
+prefect
+psycopg2-binary

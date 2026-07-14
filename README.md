@@ -1,121 +1,124 @@
 # Stock Market ETL Pipeline
 
-A Python ETL (Extract, Transform, Load) pipeline that ingests daily stock history from the Alpha Vantage API, transforms the response, and loads structured records into a SQLite database. It backfills ~100 days of history per ticker on the first run and can be re-run — or **run automatically on a schedule** — to keep a queryable time series of market data up to date.
+A Python ETL pipeline that ingests daily stock history from the Alpha Vantage API, transforms the response, and loads it into a **PostgreSQL** database. It is **orchestrated with Prefect**, giving it automatic retries, per-task logging, an observable task graph, and a weekday cron schedule.
 
-The project exists in two forms:
-
-- **`pipeline.py`** — the original standalone script. Fetches, transforms, and loads in a single linear run.
-- **`prefect_pipeline.py`** — the same ETL logic re-architected with [Prefect](https://www.prefect.io/), adding orchestration, automatic retries, structured logging, and one-line scheduling. This is the version intended to run unattended.
+The pipeline backfills roughly 100 days of history per ticker on the first run, and can be re-run — or run automatically on a schedule — to keep a queryable time series of market data up to date. Re-running never creates duplicates.
 
 ## What it does
 
-**Extract** — calls the Alpha Vantage `TIME_SERIES_DAILY` REST endpoint for a configurable list of tickers (AAPL, TSLA, MSFT, NVDA). Each call returns roughly 100 days of daily history (`outputsize=compact`), parsed from the nested JSON response.
+**Extract** — calls the Alpha Vantage `TIME_SERIES_DAILY` endpoint for a configurable list of tickers (AAPL, TSLA, MSFT, NVDA). Each call returns ~100 days of daily history (`outputsize=compact`), parsed from a nested JSON response.
 
-**Transform** — for every day in the response, extracts a defined set of fields: `symbol`, `date`, `open`, `high`, `low`, and `close` (stored as `price`).
+**Transform** — flattens the response into row tuples of `symbol`, `date`, `open`, `high`, `low`, and `close` (stored as `price`).
 
-**Load** — writes each daily record into a SQLite database using parameterised SQL, with `INSERT OR REPLACE` keyed on `(symbol, date)`. The pipeline is idempotent: re-running it overwrites overlapping days and adds new ones, never creating duplicates.
+**Load** — upserts each row into PostgreSQL using parameterised SQL and `ON CONFLICT (symbol, date) DO UPDATE`. The pipeline is idempotent: overlapping days are overwritten, new days are added, duplicates are never created.
 
-## Orchestration and scheduling (Prefect)
+## Orchestration (Prefect)
 
-`prefect_pipeline.py` wraps each stage — extract, transform, load — in a Prefect `@task`, orchestrated by a `@flow`. This turns a linear script into an observable, resilient pipeline:
+Each stage — extract, transform, load — is a Prefect `@task`, wrapped in a `@flow`. This is what turns a linear script into a resilient, observable pipeline:
 
-- **Automatic retries.** The extract task is configured with `retries=3, retry_delay_seconds=20`. Instead of catching an error and *skipping* a ticker, a failed extract *raises*, and Prefect re-runs it automatically. The 20-second delay is long enough for Alpha Vantage's per-minute rate-limit window to clear, so a throttled ticker typically recovers on the retry rather than being lost. This is a strict upgrade over silent skips: the pipeline moves from "skip and hope" to "retry and recover."
-- **Structured logging.** Each task run is individually logged and timestamped, so it's clear exactly which ticker failed, why, and whether it recovered.
-- **Scheduling.** The `serve()` call at the bottom of the file registers the flow on a cron schedule (`0 18 * * 1-5` — 18:00, Monday to Friday) and runs it as a long-lived process, firing each run automatically with no manual trigger.
-- **Observability.** When run against a local Prefect server (`prefect server start`), every run appears in the Prefect dashboard at `http://127.0.0.1:4200`, with per-task status, timing, and logs.
+- **Automatic retries.** The extract task is configured with `retries=3, retry_delay_seconds=20`. A failed extract *raises* rather than being silently skipped, and Prefect re-runs it. The 20-second delay is long enough for Alpha Vantage's per-minute rate limit to clear, so a throttled ticker recovers on the retry instead of being lost. This has been observed working in practice: during a live run, NVDA hit the API rate limit, was retried automatically, and completed with no data loss and no manual intervention.
+- **Per-task observability.** Every task run is individually tracked, timed, and logged, so it's clear exactly which ticker failed, why, and whether it recovered. A four-ticker run produces 12 tracked task runs (4 tickers × 3 stages), visible in the Prefect UI.
+- **Scheduling.** `stock_etl.serve(name="stock-etl-weekday", cron="0 18 * * 1-5")` registers the flow to run automatically at 18:00, Monday to Friday, against a running Prefect server.
 
-## Tech stack
+## Database
 
-- **Python** — `requests` (HTTP), `sqlite3` (database), `python-dotenv` (config)
-- **Prefect** — workflow orchestration, retries, scheduling, and observability
-- **SQLite** — local relational database
-- **Alpha Vantage API** — free-tier market data source
+PostgreSQL 18, with a composite primary key on `(symbol, date)`:
 
-## Project structure
+| Column | Type | Notes |
+|---|---|---|
+| `symbol` | `TEXT` | part of composite PK |
+| `date` | `DATE` | part of composite PK |
+| `open` | `NUMERIC` | |
+| `high` | `NUMERIC` | |
+| `low` | `NUMERIC` | |
+| `price` | `NUMERIC` | daily close |
 
-| File | Purpose |
-| --- | --- |
-| `setup_db.py` | One-time script that creates the database and `stocks` table |
-| `pipeline.py` | The original standalone ETL run |
-| `prefect_pipeline.py` | The orchestrated, schedulable version (Prefect tasks + flow + cron) |
-| `.env` | Holds the API key (not committed — see Setup) |
+`date` is a real `DATE` type rather than text, so the database understands chronology — date ordering and arithmetic are correct by construction, which matters for the window function queries below. `NUMERIC` is used for prices rather than a floating-point type to avoid rounding error.
 
-Setup and ingestion are kept in separate files to maintain a clean separation of concerns. The `stocks` table uses a composite primary key of `(symbol, date)`, which is what makes the `INSERT OR REPLACE` re-run behaviour possible.
+The composite primary key is what makes the upsert work: it's the conflict target that `ON CONFLICT (symbol, date) DO UPDATE` keys on.
 
 ## Setup
 
-Clone the repo and install dependencies:
+Requires Python 3.10+ and a running PostgreSQL server.
 
 ```bash
-pip install requests python-dotenv prefect
+pip install -r requirements.txt
 ```
 
-Get a free Alpha Vantage API key from https://www.alphavantage.co/support/#api-key
-
-Create a `.env` file in the project root with your key:
+Create a database (e.g. `stocks`), then create a `.env` file in the project root:
 
 ```
-ALPHA_VANTAGE_KEY=your_key_here
+ALPHA_VANTAGE_KEY=your_api_key
+DB_NAME=stocks
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_HOST=localhost
+DB_PORT=5432
 ```
 
-Create the database (run once):
+`.env` is gitignored and never committed.
+
+## Running
+
+Create the table (once):
 
 ```bash
 python setup_db.py
 ```
 
-### Run once
+Run the pipeline once:
 
 ```bash
 python prefect_pipeline.py
 ```
 
-(with the `serve()` block commented out and the direct `stock_etl()` call active)
+To run it on a schedule instead, comment out the direct `stock_etl()` call at the bottom of `prefect_pipeline.py` and uncomment the `serve()` block. Start a Prefect server in a separate terminal:
 
-### Run on a schedule
+```bash
+prefect server start
+```
 
-1. In one terminal, start a local Prefect server:
-   ```bash
-   prefect server start
-   ```
-2. Point Prefect at it (one-time):
-   ```bash
-   prefect config set PREFECT_API_URL=http://127.0.0.1:4200/api
-   ```
-3. In a second terminal, start the scheduled service (with the `serve()` block active):
-   ```bash
-   python prefect_pipeline.py
-   ```
-
-The flow now fires automatically on its cron schedule. Runs are visible live in the dashboard at `http://127.0.0.1:4200`.
+The dashboard is then available at `http://127.0.0.1:4200`, where flow runs, task graphs, retries, and the registered deployment schedule can all be inspected.
 
 ## Querying the data
 
-Once the pipeline has run, the data can be queried with SQL. For example:
+The `date`/`NUMERIC` schema supports window functions directly. `window_practice.py` and `window_practice_real.py` contain worked examples against the real dataset, including:
+
+- **7-day moving average** of closing price per ticker
+- **Day-over-day change**, using `LAG` to compare each row against the previous trading day
+- **Ranking** tickers by performance within a period
+
+Example — moving average per ticker:
 
 ```sql
--- Average price per stock
-SELECT symbol, AVG(price) FROM stocks GROUP BY symbol;
-
--- Highest price recorded
-SELECT symbol, MAX(price) FROM stocks;
-
--- 5-day moving average of closing price (window function)
-SELECT symbol, date, price,
-       AVG(price) OVER (PARTITION BY symbol ORDER BY date
-                        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS moving_avg_5d
-FROM stocks ORDER BY symbol, date;
+SELECT
+    symbol,
+    date,
+    price,
+    AVG(price) OVER (
+        PARTITION BY symbol
+        ORDER BY date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS moving_avg_7d
+FROM stocks
+ORDER BY symbol, date;
 ```
 
-## Roadmap
+## Project structure
 
-Planned next steps to extend this into a fuller deployment story:
-
-- **Migrate from SQLite to PostgreSQL** (switching the upsert to `ON CONFLICT`).
-- **Containerise** the pipeline and its dependencies with Docker.
+| File | Purpose |
+|---|---|
+| `prefect_pipeline.py` | The pipeline. Prefect-orchestrated, PostgreSQL-backed. **This is the current version.** |
+| `setup_db.py` | Creates the PostgreSQL `stocks` table. |
+| `window_practice.py` | Window function queries against sample data. |
+| `window_practice_real.py` | Window function queries against the real dataset. |
+| `pipeline.py` | The original standalone script (SQLite, no orchestration). Kept for reference to show the project's starting point; superseded by `prefect_pipeline.py`. |
 
 ## Notes
 
-The Alpha Vantage free tier is limited to 25 requests per day and a few requests per minute. In `prefect_pipeline.py`, a rate-limited ticker raises and is retried automatically (up to three times, 20 seconds apart) rather than skipped, so throttled requests usually recover within the same run.
+- The free Alpha Vantage tier is rate limited (25 requests/day, with a per-minute burst limit). The flow sleeps between tickers to stay within it, and the retry logic handles the case where it doesn't.
+- `outputsize=compact` returns ~100 days. Switching to `full` returns 20+ years of history.
 
-The API key is loaded from a `.env` file and excluded from version control via `.gitignore`, so no credentials are committed to the repository.
+## Roadmap
+
+- **Docker** — containerise the pipeline alongside a PostgreSQL container so the whole stack runs anywhere with a single command.
