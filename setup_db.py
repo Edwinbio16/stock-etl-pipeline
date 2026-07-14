@@ -1,20 +1,30 @@
-import sqlite3
+import os
+import psycopg2
+from dotenv import load_dotenv
 
-connection = sqlite3.connect("stock_data.db")
-cursor = connection.cursor()
+load_dotenv()
+
+conn = psycopg2.connect(
+    dbname=os.getenv("DB_NAME"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD"),
+    host=os.getenv("DB_HOST"),
+    port=os.getenv("DB_PORT")
+)
+cursor = conn.cursor()
 
 cursor.execute("""
-    CREATE TABLE IF NOT EXISTS stocks (
-        symbol TEXT,
-        date TEXT,
-        open REAL,
-        high REAL,
-        low REAL,
-        price REAL,
-        PRIMARY KEY (symbol, date)
-    )
+   CREATE TABLE IF NOT EXISTS stocks (
+       symbol TEXT,
+       date DATE,
+       open NUMERIC,
+       high NUMERIC,
+       low NUMERIC,
+       price NUMERIC,
+       PRIMARY KEY (symbol, date)
+    )  
 """)
 
-connection.commit()
-connection.close()
-print("Database setup complete.")
+conn.commit()
+conn.close()
+print("Postgres stocks table ready.")

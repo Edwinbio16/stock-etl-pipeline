@@ -13,9 +13,8 @@ script:
 Run a single run:   python prefect_pipeline.py
 Run on a schedule:  uncomment the serve() call at the bottom, then run the same command.
 """
-
 import os
-import sqlite3
+import psycopg2
 
 import requests
 from dotenv import load_dotenv
@@ -95,20 +94,30 @@ def transform(payload: dict) -> list:
 def load(rows: list) -> int:
     logger = get_run_logger()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg2.connect(
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+   )
     cursor = conn.cursor()
     cursor.executemany(
         """
-        INSERT OR REPLACE INTO stocks
-            (symbol, date, open, high, low, price)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO stocks (symbol, date, open, high, low, price)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (symbol, date) DO UPDATE SET
+        open = EXCLUDED.open,
+        high = EXCLUDED.high,
+        low = EXCLUDED.low,
+        price = EXCLUDED.price
         """,
         rows,
-    )
-    conn.commit()
-    written = cursor.rowcount
-    conn.close()
 
+   )
+    conn.commit()
+    written=cursor.rowcount
+    conn.close()
     logger.info(f"Loaded {written} rows")
     return written
 
@@ -134,10 +143,10 @@ def stock_etl():
 
 if __name__ == "__main__":
     # --- Option A: run once, right now ---
-    # stock_etl()
+    stock_etl()
 
     # --- Option B: run on a schedule ---
-    stock_etl.serve(
-        name="stock-etl-weekday",
-        cron="0 18 * * 1-5",
-    )
+    #stock_etl.serve(
+        #name="stock-etl-weekday",
+        #cron="0 18 * * 1-5",
+    #)
