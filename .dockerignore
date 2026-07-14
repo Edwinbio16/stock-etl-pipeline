@@ -1,0 +1,20 @@
+# Never bake secrets into an image. Compose passes .env in at runtime instead.
+.env
+
+# Version control and IDE noise
+.git
+.gitignore
+.idea
+.claude
+
+# Python artefacts
+__pycache__
+*.pyc
+
+# Old SQLite artefacts — superseded by Postgres
+*.db
+*.csv
+
+# Local junk
+User Interface/
+files/

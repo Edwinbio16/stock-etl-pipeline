@@ -1,0 +1,54 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # The database. Pulled ready-made from Docker Hub — no installer, no manual
+  # setup. The POSTGRES_* variables tell the image to create this user, password
+  # and database on first boot.
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      # Expose Postgres on the host so you can still connect with pgAdmin.
+      # host:container — 5433 on your machine to avoid clashing with the
+      # PostgreSQL 18 you installed today, which already owns 5432.
+      - "5433:5432"
+    volumes:
+      # Named volume so the data survives `docker compose down`.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Postgres accepts TCP connections before it's actually ready to serve
+      # queries. This check asks it properly, so the pipeline doesn't start
+      # against a database that isn't listening yet.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # The pipeline. Built from the Dockerfile in this directory.
+  # ---------------------------------------------------------------------------
+  pipeline:
+    build: .
+    depends_on:
+      db:
+        # Wait for the healthcheck above to pass, not just for the container
+        # to exist. Without this the pipeline races the database and fails.
+        condition: service_healthy
+    environment:
+      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      # NOT localhost. Inside the compose network each service is reachable by
+      # its service name, so the database's hostname is literally "db".
+      # "localhost" inside the pipeline container means the pipeline container
+      # itself — this is the single most common Docker mistake.
+      DB_HOST: db
+      DB_PORT: 5432
+
+volumes:
+  pgdata:

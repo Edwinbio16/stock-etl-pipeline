@@ -113,12 +113,45 @@ ORDER BY symbol, date;
 | `window_practice.py` | Window function queries against sample data. |
 | `window_practice_real.py` | Window function queries against the real dataset. |
 | `pipeline.py` | The original standalone script (SQLite, no orchestration). Kept for reference to show the project's starting point; superseded by `prefect_pipeline.py`. |
-
+| `Dockerfile` | Builds the pipeline image. |
+| `docker-compose.yml` | Defines the pipeline and PostgreSQL services. |
+| `.dockerignore` | Excludes secrets and build artefacts from the image. |
 ## Notes
 
 - The free Alpha Vantage tier is rate limited (25 requests/day, with a per-minute burst limit). The flow sleeps between tickers to stay within it, and the retry logic handles the case where it doesn't.
 - `outputsize=compact` returns ~100 days. Switching to `full` returns 20+ years of history.
 
-## Roadmap
 
-- **Docker** — containerise the pipeline alongside a PostgreSQL container so the whole stack runs anywhere with a single command.
+## Running with Docker (recommended)
+
+The whole stack — the pipeline *and* its PostgreSQL database — is containerised, so it runs identically on any machine with Docker installed. No local PostgreSQL install, no Python environment setup.
+
+```bash
+docker compose up --build
+```
+
+That single command:
+
+1. Pulls a PostgreSQL 16 image and starts it as the `db` service
+2. Builds the pipeline image from the `Dockerfile`
+3. Waits for PostgreSQL to pass its healthcheck
+4. Creates the `stocks` table and runs the ETL flow
+
+Stop and remove the containers with `docker compose down`. Data persists in a named volume (`pgdata`) across restarts; `docker compose down -v` removes it too.
+
+### How it fits together
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Builds the pipeline image. `requirements.txt` is copied and installed *before* the application code so Docker's layer cache reuses the dependency install when only code changes. |
+| `docker-compose.yml` | Defines the two services (`db`, `pipeline`), the private network between them, the healthcheck, and the persistent volume. |
+| `.dockerignore` | Keeps secrets (`.env`), version control, and build artefacts out of the image. |
+
+Two details worth noting:
+
+- **Service names are hostnames.** Inside the compose network, the pipeline reaches the database at `db`, not `localhost` — `localhost` inside a container refers to that container itself. Compose injects `DB_HOST=db` at runtime.
+- **The pipeline waits for a healthy database.** PostgreSQL accepts TCP connections shortly before it can serve queries, so `depends_on: condition: service_healthy` gates the pipeline on a `pg_isready` healthcheck rather than merely on the container existing.
+
+Secrets are never baked into the image. `.env` is excluded via `.dockerignore` and its values are passed in as environment variables at runtime.
+
+The container publishes PostgreSQL on host port **5433** (mapped to 5432 inside), so it doesn't collide with a PostgreSQL instance already installed locally on 5432. Connect a client such as pgAdmin to `localhost:5433` to inspect the containerised database.
