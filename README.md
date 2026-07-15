@@ -13,6 +13,7 @@ The pipeline backfills roughly 100 days of history per ticker on the first run, 
 **Load** — upserts each row into PostgreSQL using parameterised SQL and `ON CONFLICT (symbol, date) DO UPDATE`. The pipeline is idempotent: overlapping days are overwritten, new days are added, duplicates are never created.
 
 ## Orchestration (Prefect)
+![Prefect flow run](docs/pipeline-run.gif)
 
 Each stage — extract, transform, load — is a Prefect `@task`, wrapped in a `@flow`. This is what turns a linear script into a resilient, observable pipeline:
 
